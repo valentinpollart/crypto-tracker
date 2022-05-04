@@ -1,0 +1,199 @@
+'use strict';
+
+const Gio = imports.gi.Gio;
+const GLib = imports.gi.GLib;
+const Atk = imports.gi.Atk;
+const GObject = imports.gi.GObject;
+const St = imports.gi.St;
+const Clutter = imports.gi.Clutter;
+
+const ExtensionUtils = imports.misc.extensionUtils;
+const Me = ExtensionUtils.getCurrentExtension();
+const Main = imports.ui.main;
+const PopupMenu = imports.ui.popupMenu;
+const PanelMenu = imports.ui.panelMenu;
+
+const Binance = Me.imports.api.binance;
+const { CoinItem } = Me.imports.models.coinItem;
+const convenience = Me.imports.convenience;
+const Schema = convenience.getSettings(
+    'org.gnome.shell.extensions.crypto-tracker'
+);
+const Settings = Me.imports.settings;
+
+const Config = imports.misc.config;
+const SHELL_MINOR = parseInt(Config.PACKAGE_VERSION.split('.')[1]);
+
+const SELECT_TEXT = 'Select';
+
+var menuItem;
+
+var Indicator = class CIndicator extends PanelMenu.Button {
+    _init() {
+        super._init(0.0, `${Me.metadata.name} Indicator`, false);
+        this.coins = [];
+        menuItem = new St.Label({
+            text: 'Crypto',
+            y_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this.actor.add_child(menuItem);
+
+        this.coinSection = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this.coinSection);
+    }
+
+    destroy() {
+        super.destroy();
+    }
+
+    _generateAddCoinPart() {
+        let addCoinBtnMenu = new PopupMenu.PopupSubMenuMenuItem('Add Coin');
+        this.menu.addMenuItem(addCoinBtnMenu);
+
+        let addCoinSubMenu = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+        });
+        addCoinBtnMenu.menu.addMenuItem(addCoinSubMenu);
+
+        let vbox = new St.BoxLayout({
+            style_class: 'add-coin-vbox',
+            vertical: true,
+            x_expand: true,
+        });
+        addCoinSubMenu.actor.add_child(vbox);
+
+        let hbox = new St.BoxLayout({ x_expand: true });
+        vbox.add(hbox);
+
+        let coinSymbol = new St.Entry({
+            name: 'symbol',
+            hint_text: 'Name/Vol     ',
+            can_focus: true,
+            x_expand: true,
+            style_class: 'crypto-input',
+        });
+        hbox.add(coinSymbol);
+
+        let coinTitle = new St.Entry({
+            name: 'title',
+            hint_text: 'Label?',
+            can_focus: true,
+            x_expand: true,
+            style_class: 'crypto-input',
+        });
+        hbox.add(coinTitle);
+
+        let addBtn = new St.Button({
+            label: 'Add',
+            style_class: 'crypto-input btn',
+        });
+        addBtn.connect(
+            'clicked',
+            this._addCoin.bind(this, coinSymbol, coinTitle)
+        );
+        hbox.add(addBtn);
+    }
+    _addCoin( coinSymbol, coinTitle) {
+        // TODO show error 
+        if (coinSymbol.text == '' || !coinSymbol.text.includes('/')) return;
+
+        let coin = new CoinItem(coinSymbol.text, false, coinTitle.text);
+        let result = Settings.addCoin({
+            symbol: coin.symbol,
+            active: coin.activeCoin,
+            title: coin.title
+        });
+        if (result) this._buildCoinsSection();
+
+        coinTitle.text = '';
+        coinSymbol.text = '';
+    }
+
+    _buildCoinsSection() {
+        this._setCoinsFromSettings();
+        this._startTimer()
+        this.coinSection.removeAll();
+        for (const coin of this.coins) {
+            this.coinSection.addMenuItem(coin);
+        }
+    }
+
+    _startTimer() {
+        this._refreshPrice(menuItem);
+        this.timeOutTag = GLib.timeout_add(1, 1000 * 10, async () => {
+            await this._refreshPrice(menuItem);
+            return true;
+        });
+    }
+
+    async _refreshPrice(menuText) {
+        let text = '';
+
+        for (const coin of this.coins) {
+            if (!coin.activeCoin)
+                continue;
+
+            let result = await coin._getPrice();
+            const jsonRes = JSON.parse(result.body);
+            let price = jsonRes.price;
+            let priceParts = price.split('.');
+
+            const totalLen = 4;
+            let len = 0;
+            len += priceParts[0].length;
+            price = priceParts[0] + '.';
+            let i = 0;
+            for (len; len < totalLen; len++) {
+                price += priceParts[1][i];
+                i++;
+            }
+            if (+price == 0)
+                for (let i = len; i < priceParts[1].length; i++) {
+                    price += priceParts[1][i];
+                }
+            text += `${coin.title||coin.symbol}   ${price}   `;
+        }
+        menuText.text = text;
+    }
+
+    _setCoinsFromSettings() {
+        this.coins = [];
+        let coins = Settings.getCoins();
+        for (const coin of coins) {
+            let { symbol, active, title } = coin;
+            let _coin = new CoinItem(symbol, active, title);
+            this.coins.push(_coin);
+        }
+    }
+};
+
+if (SHELL_MINOR > 30) {
+    Indicator = GObject.registerClass({ GTypeName: 'Indicator' }, Indicator);
+}
+
+var indicator = null;
+
+function addCoin(coin, reset) {
+    if (reset == true) indicator.coins = [];
+    indicator.coins.push(coin);
+}
+
+function init() {}
+
+function enable() {
+    indicator = new Indicator();
+
+    indicator._buildCoinsSection();
+    indicator._generateAddCoinPart();
+
+    Main.panel.addToStatusArea(`${Me.metadata.name} Indicator`, indicator);
+}
+
+function disable() {
+    if (indicator !== null) {
+        indicator.destroy();
+        indicator = null;
+    }
+}
